@@ -140,170 +140,234 @@ def run(
 #推理部分
     # Run inference 热身部分
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup # 使用空白图片（零矩阵）预先用GPU跑一遍预测流程，可以加速预测
-    seen, windows, dt = 0, [], (Profile(), Profile(), Profile()) #dt: 存储每一步骤的耗时seen: 计数功能，已经处理完了多少帧图片
-    for path, im, im0s, vid_cap, s in dataset: # 去遍历图片，进行计数
-        with dt[0]:
-            im = torch.from_numpy(im).to(model.device)
-            im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
-            im /= 255  # 0 - 255 to 0.0 - 1.0
-            if len(im.shape) == 3:
-                im = im[None]  # expand for batch dim
+    seen, windows, dt = 0, [], (Profile(), Profile(), Profile()) #seen、windows和dt，分别表示已处理的图片数量、窗口列表和时间消耗列表
+    for path, im, im0s, vid_cap, s in dataset:  # 遍历数据集中的图像路径、图像数组、原始图像、视频捕获对象、图像的尺寸
+     with dt[0]:  # 记录数据加载的时间
+        im = torch.from_numpy(im).to(model.device)  # 将图像数组转换为PyTorch张量，并移到指定设备上
+        im = im.half() if model.fp16 else im.float()  # 如果模型使用FP16精度，将图像数据类型转换为半精度浮点数
+        im /= 255  # 将像素值从0-255转换为0.0-1.0的范围
+        if len(im.shape) == 3:
+            im = im[None]  # 在需要的情况下扩展维度，添加批次维度
 
-        # Inference
-        with dt[1]:
-            visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-            pred = model(im, augment=augment, visualize=visualize)
+    # 推断
+    with dt[1]:  # 记录推断的时间
+        visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False  # 根据条件创建可视化的路径
+        pred = model(im, augment=augment, visualize=visualize)  # 使用模型进行推断，可以选择进行数据增强和可视化
 
-        # NMS
-        with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+    # NMS（非极大值抑制）
+    with dt[2]:  # 记录NMS的时间
+        pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)  # 应用非极大值抑制
 
-        # Second-stage classifier (optional)
-        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
+    # 第二阶段分类器（可选）
+    # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
-        # Define the path for the CSV file
-        csv_path = save_dir / 'predictions.csv'
+    # 定义CSV文件的路径
+    csv_path = save_dir / 'predictions.csv'
 
-        # Create or append to the CSV file
-        def write_to_csv(image_name, prediction, confidence):
-            data = {'Image Name': image_name, 'Prediction': prediction, 'Confidence': confidence}
-            with open(csv_path, mode='a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=data.keys())
-                if not csv_path.is_file():
-                    writer.writeheader()
-                writer.writerow(data)
+    # 创建或追加到CSV文件
+    def write_to_csv(image_name, prediction, confidence):
+        data = {'Image Name': image_name, 'Prediction': prediction, 'Confidence': confidence}  # 构建CSV文件的数据行
+        with open(csv_path, mode='a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=data.keys())  # 创建CSV写入对象
+            if not csv_path.is_file():
+                writer.writeheader()  # 如果文件不存在，写入CSV文件的头部
+            writer.writerow(data)  # 写入数据行到CSV文件
 
-        # Process predictions
-        for i, det in enumerate(pred):  # per image
-            seen += 1
-            if webcam:  # batch_size >= 1
-                p, im0, frame = path[i], im0s[i].copy(), dataset.count
-                s += f'{i}: '
-            else:
-                p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+      # 处理预测结果
+for i, det in enumerate(pred):  # 遍历每张图像的预测结果
+    seen += 1
+    if webcam:  # 如果是处理摄像头输入（批处理大小 >= 1）
+        p, im0, frame = path[i], im0s[i].copy(), dataset.count
+        s += f'{i}: '
+    else:
+        p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
-            p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # im.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop
-            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            if len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
+    p = Path(p)  # 转换为Path对象
+    save_path = str(save_dir / p.name)  # 保存图像的路径，如 im.jpg
+    txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # 保存标签文件的路径，如 im.txt
+    s += '%gx%g ' % im.shape[2:]  # 将图像尺寸添加到输出字符串中
+    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # 归一化增益（用于还原归一化坐标）
+    imc = im0.copy() if save_crop else im0  # 用于保存裁剪预测框的图像
+    annotator = Annotator(im0, line_width=line_thickness, example=str(names))  # 创建图像注释器对象
+    if len(det):
+        # 将预测框的坐标从图像尺寸转换为原始图像尺寸
+        det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
-                # Print results
-                for c in det[:, 5].unique():
-                    n = (det[:, 5] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+        # 打印检测结果
+        for c in det[:, 5].unique():
+            n = (det[:, 5] == c).sum()  # 统计每个类别的检测数量
+            s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # 将类别和检测数量添加到输出字符串中
 
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    c = int(cls)  # integer class
-                    label = names[c] if hide_conf else f'{names[c]}'
-                    confidence = float(conf)
-                    confidence_str = f'{confidence:.2f}'
+                # 写入检测结果
+for *xyxy, conf, cls in reversed(det):  # 遍历每个检测框
+    c = int(cls)  # 类别索引
+    label = names[c] if hide_conf else f'{names[c]}'  # 获取类别名称，带有置信度信息
+    confidence = float(conf)  # 获取检测置信度
+    confidence_str = f'{confidence:.2f}'  # 将置信度格式化为字符串
 
-                    if save_csv:
-                        write_to_csv(p.name, label, confidence_str)
+    if save_csv:  # 保存到CSV文件
+        write_to_csv(p.name, label, confidence_str)
 
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
-                        with open(f'{txt_path}.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+    if save_txt:  # 保存到文本文件
+        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # 归一化坐标转换为相对于原始图像的xywh格式
+        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # 根据是否保存置信度选择不同的格式
+        with open(f'{txt_path}.txt', 'a') as f:
+            f.write(('%g ' * len(line)).rstrip() % line + '\n')  # 写入文本文件
 
-                    if save_img or save_crop or view_img:  # Add bbox to image
-                        c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                        annotator.box_label(xyxy, label, color=colors(c, True))
-                    if save_crop:
-                        save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+    if save_img or save_crop or view_img:  # 添加边界框到图像
+        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')  # 根据选项确定是否显示标签
+        annotator.box_label(xyxy, label, color=colors(c, True))  # 在图像上标注边界框及标签
+    if save_crop:  # 保存裁剪的预测框
+        save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
 
-            # Stream results
-            im0 = annotator.result()
-            if view_img:
-                if platform.system() == 'Linux' and p not in windows:
-                    windows.append(p)
-                    cv2.namedWindow(str(p), cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)  # allow window resize (Linux)
-                    cv2.resizeWindow(str(p), im0.shape[1], im0.shape[0])
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
+# 显示检测结果
+im0 = annotator.result()  # 获取带有标注的图像
+if view_img:  # 如果需要显示图像
+    if platform.system() == 'Linux' and p not in windows:
+        windows.append(p)
+        cv2.namedWindow(str(p), cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)  # 创建可调整大小的窗口（仅在Linux下）
+        cv2.resizeWindow(str(p), im0.shape[1], im0.shape[0])  # 调整窗口大小
+    cv2.imshow(str(p), im0)  # 显示图像
+    cv2.waitKey(1)  # 等待按键输入（1毫秒）
 
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
-                else:  # 'video' or 'stream'
-                    if vid_path[i] != save_path:  # new video
-                        vid_path[i] = save_path
-                        if isinstance(vid_writer[i], cv2.VideoWriter):
-                            vid_writer[i].release()  # release previous video writer
-                        if vid_cap:  # video
-                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
-                        save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
-                        vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer[i].write(im0)
+           # 保存结果（带有检测框的图像）
+if save_img:  # 如果需要保存图像
+    if dataset.mode == 'image':  # 单张图像模式
+        cv2.imwrite(save_path, im0)  # 保存图像
+    else:  # 视频或流模式
+        if vid_path[i] != save_path:  # 新视频
+            vid_path[i] = save_path
+            if isinstance(vid_writer[i], cv2.VideoWriter):
+                vid_writer[i].release()  # 释放之前的视频写入器
+            if vid_cap:  # 视频模式
+                fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            else:  # 流模式
+                fps, w, h = 30, im0.shape[1], im0.shape[0]
+            save_path = str(Path(save_path).with_suffix('.mp4'))  # 强制在结果视频上添加 *.mp4 后缀
+            vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))  # 创建视频写入器
+        vid_writer[i].write(im0)  # 写入图像
 
-        # Print time (inference-only)
-        LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
+# 打印时间（仅推理）
+LOGGER.info(f"{s}{'' if len(det) else '(无检测), '}{dt[1].dt * 1E3:.1f}ms")
 
-    # Print results
-    t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
-    LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
-    if save_txt or save_img:
-        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
-    if update:
-        strip_optimizer(weights[0])  # update model (to fix SourceChangeWarning)
+# 打印结果
+t = tuple(x.t / seen * 1E3 for x in dt)  # 计算每张图像的速度
+LOGGER.info(f'速度: %.1fms 预处理, %.1fms 推理, %.1fms NMS 每张图像，图像形状 {(1, 3, *imgsz)}' % t)
+if save_txt or save_img:
+    s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
+    LOGGER.info(f"结果保存至 {colorstr('bold', save_dir)}{s}")
+if update:
+    strip_optimizer(weights[0])  # 更新模型（解决SourceChangeWarning问题）
 
 
+
+# 解析命令行参数
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='model path or triton URL')
-    parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
-    parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
-    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
-    parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--view-img', action='store_true', help='show results')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
-    parser.add_argument('--save-csv', action='store_true', help='save results in CSV format')
-    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
-    parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
-    parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
-    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
-    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
-    parser.add_argument('--augment', action='store_true', help='augmented inference')
-    parser.add_argument('--visualize', action='store_true', help='visualize features')
-    parser.add_argument('--update', action='store_true', help='update all models')
-    parser.add_argument('--project', default=ROOT / 'runs/detect', help='save results to project/name')
-    parser.add_argument('--name', default='exp', help='save results to project/name')
-    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
-    parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
-    parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
-    parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
-    parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
-    parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
-    opt = parser.parse_args()
-    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+
+    # 模型参数
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='模型路径或 Triton URL')
+    #weights：模型权重文件的路径
+    #nargs：参数值的个数。'+' 表示可以接受多个参数值，并以列表形式存储
+    #type=str：参数值的类型，指定为字符串
+    # 数据源参数
+    parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='文件/目录/URL/glob/屏幕/0(摄像头)')
+    #source：输入图像、视频或摄像头的路径或URL
+    # 数据集参数
+    parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='（可选）dataset.yaml 路径')
+    #data：数据集的配置文件路径，用于加载类别标签等信息
+    # 推理参数
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='推理尺寸 h,w')
+    #imgsz：推理时输入图片的尺寸，默认值为 [640]
+    parser.add_argument('--conf-thres', type=float, default=0.25, help='置信度阈值')
+    #conf-thres：置信度阈值，默认为 0.50（调整检测结果的严格度，在输出结果中，只有置信度大于该阈值的检测框才会被保留，小于该阈值的将被过滤掉）
+    parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU 阈值')
+    #iou-thres：非极大抑制时的 IoU 阈值，默认为 0.45（IoU 阈值表示两个边界框之间的重叠度阈值，当两个边界框的 IoU 大于该阈值时，NMS 将保留置信度更高的那个边界框，而舍弃另一个，如果 IoU 小于该阈值，两个边界框都将被保留。
+    较高的 IoU 阈值将导致更大的重叠度被允许，从而保留更多的边界框，但可能导致重复检测。较低的 IoU 阈值将限制边界框的重叠度，提高去重效果，但可能会导致一些物体漏检）
+    parser.add_argument('--max-det', type=int, default=1000, help='每张图像的最大检测数')
+    #max-det：每张图片最多检测出的物体数，默认为 1000
+    # 设备参数
+    parser.add_argument('--device', default='', help='cuda 设备，例如 0 或 0,1,2,3 或 cpu')
+    #device：使用的设备，可以是 cuda 设备的 ID（例如 0、0,1,2,3）或者是 'cpu'，默认为 '0'
+    # 可视化参数
+    parser.add_argument('--view-img', action='store_true', help='显示结果')
+    #view-img：是否在推理时显示结果，默认为 False
+    #action='store_true' 表示当命令行中包含 --view-img 时，将该参数的值设置为 True。如果未指定 --view-img，则其值将保持默认的 False。
+    parser.add_argument('--save-txt', action='store_true', help='保存结果为 *.txt 文件')
+    #save-txt：是否保存检测结果到 TXT 文件，默认为 False
+    parser.add_argument('--save-csv', action='store_true', help='以 CSV 格式保存结果')
+    #save-conf：是否保存检测结果的置信度到 TXT 文件，默认为 False
+    parser.add_argument('--save-conf', action='store_true', help='将置信度保存在 --save-txt 标签中')
+    #save-conf：是否将置信度保存在 --save-txt 标签中
+    parser.add_argument('--save-crop', action='store_true', help='保存裁剪后的预测框')
+    #save-crop：是否保存检测结果中的物体裁剪图像，默认为 False
+    parser.add_argument('--nosave', action='store_true', help='不保存图像/视频')
+    #nosave：是否保存结果图像或视频，默认为 False
+
+    # 过滤参数
+    parser.add_argument('--classes', nargs='+', type=int, help='按类别过滤：--classes 0，或 --classes 0 2 3')
+    #classes：仅检测指定类别，默认为 None
+    parser.add_argument('--agnostic-nms', action='store_true', help='类别无关的 NMS')
+    #agnostic-nms：是否使用类别不敏感的非极大抑制（即不考虑类别信息），默认为 False
+    #NMS 的目标是去除具有重叠区域的检测框，以避免对同一个目标进行多次计数。agnostic-nms 这个参数控制了在执行 NMS 时是否考虑物体的类别信息
+    #如果 agnostic-nms 为 True，则 NMS 不考虑物体的类别信息。它会把所有类别的检测框看作是一个整体，只保留最具代表性的框，而不管它们属于哪个类别。
+    #如果 agnostic-nms 为 False，则 NMS 会按照物体的类别独立进行操作。对于每个类别，它会单独执行 NMS，确保在同一类别内执行抑制，而不同类别之间的框不受影响。
+    # 推理增强参数
+    parser.add_argument('--augment', action='store_true', help='增强推理')
+    #augment：是否使用数据增强进行推理，默认为 False
+    #augment 参数控制是否在推理过程中使用数据增强。数据增强是通过对输入图像进行一系列随机变换来生成多样性的训练样本，从而提高模型的泛化能力。
+    在推理时使用数据增强可能会产生更多的变化，以更全面地测试模型在不同情境下的性能。
+    parser.add_argument('--visualize', action='store_true', help='可视化特征')
+    #visualize：是否可视化特征图，默认为 False
+
+    # 模型更新参数
+    parser.add_argument('--update', action='store_true', help='更新所有模型')
+    #update：是否更新所有模型，默认为 False（系统会检查模型文件是否存在更新，并在必要时下载或更新它们）
+
+    # 保存结果参数
+    parser.add_argument('--project', default=ROOT / 'runs/detect', help='将结果保存到项目/名称')
+    #project：结果保存的项目目录路径，默认为 'ROOT/runs/detect'
+    parser.add_argument('--name', default='exp', help='将结果保存到项目/名称')
+    #name：结果保存的子目录名称，默认为 'exp'
+    parser.add_argument('--exist-ok', action='store_true', help='存在项目/名称时是否递增')
+    #exist-ok：是否覆盖已有结果，默认为 False
+
+    # 可视化参数
+    parser.add_argument('--line-thickness', default=3, type=int, help='边界框厚度（像素）')
+    #line-thickness：画 bounding box 时的线条宽度，默认为 3
+    parser.add_argument('--hide-labels', default=False, action='store_true', help='隐藏标签')
+    #hide-labels：是否隐藏标签信息，默认为 False
+    parser.add_argument('--hide-conf', default=False, action='store_true', help='隐藏置信度')
+    #hide-conf：是否隐藏置信度信息，默认为 False
+
+    # 推理性能参数
+    parser.add_argument('--half', action='store_true', help='使用 FP16 半精度推理')
+    #half：是否使用 FP16 半精度进行推理，默认为 False（当 half 为 True 时，模型将使用 FP16 进行推理，从而减少计算和存储的精度，但可能会牺牲一些模型的准确性）
+    parser.add_argument('--dnn', action='store_true', help='使用 OpenCV DNN 进行 ONNX 推理')
+    #dnn：是否使用 OpenCV DNN 进行 ONNX 推理，默认为 False
+    parser.add_argument('--vid-stride', type=int, default=1, help='视频帧率步长')
+    #vid-stride：视频帧率步长，默认为1，定义了每隔多少帧进行一次检测
+
+    # 参数解析
+    opt = parser.parse_args() #Python 内置的 argparse 模块，该模块用于解析命令行参数。函数的返回值是一个包含所有解析参数的对象，可以通过调用对象的属性获取参数的值。
+
+    # 推理尺寸扩展
+    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1
+
+    # 打印参数
     print_args(vars(opt))
+
     return opt
 
 
+
 def main(opt):
-    check_requirements(ROOT / 'requirements.txt', exclude=('tensorboard', 'thop'))
-    run(**vars(opt))
+    check_requirements(ROOT / 'requirements.txt', exclude=('tensorboard', 'thop')) #检查程序所需的依赖项是否已安装
+    run(**vars(opt)) # 将 opt 变量的属性和属性值作为关键字参数传递给 run() 函数
 
 
 if __name__ == '__main__':
-    opt = parse_opt()
-    main(opt)
+    opt = parse_opt() # 解析命令行参数并将其存储在 opt 变量中
+    main(opt) #调用主函数，并将 opt 变量作为参数传递给它
