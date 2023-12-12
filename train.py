@@ -606,7 +606,8 @@ def parse_opt(known=False):
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')#resume:断点续训，默认关闭(
     1，断点续训就是从上一个训练任务中断的地方继续训练，直至训练完成；
     2，当模型按指定的epoch训练完成后，则无法进行断点续训；
-    3，需要搭配"–weights" 参数使用，指定训练中断保存的最后一次模型权重文件。)
+    3，需要搭配"–weights" 参数使用，指定训练中断保存的最后一次模型权重文件
+    nargs 参数表示接受的命令行参数个数。对于 '?'，它表示接受零个或一个参数。在这个特定的情况下，nargs='?' 的作用是指定 --resume 这个命令行参数可以有零个或一个值)
     parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')#nosave:只保留最后一次训练的权重，默认关闭
     parser.add_argument('--noval', action='store_true', help='only validate final epoch')#noval:只对最后一次训练进行验证，默认关闭
     parser.add_argument('--noautoanchor', action='store_true', help='disable AutoAnchor')#noautoanchor:关闭自动计算锚框功能，默认关闭(
